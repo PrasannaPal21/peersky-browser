@@ -106,6 +106,7 @@ setInterval(() => {
           }))
         : [],
       magnetURI: torrent.magnetURI,
+      mode: torrent.__mode || "download",
     };
     
     // Only send if status changed
@@ -132,6 +133,9 @@ process.on("message", (msg) => {
     switch (action) {
       case "start":
         handleStart(id, params);
+        break;
+      case "seed":
+        handleSeed(id, params);
         break;
       case "pause":
         handlePause(id, params);
@@ -186,6 +190,7 @@ async function handleStart(id, { magnetUri, announce }) {
     path: downloadPath,
     announce: announce || [],
   });
+  torrent.__mode = "download";
 
   torrent.on("infoHash", () => {
     console.log(`[BT-Worker] InfoHash resolved: ${torrent.infoHash}`);
@@ -200,7 +205,13 @@ async function handleStart(id, { magnetUri, announce }) {
   });
 
   torrent.on("done", () => {
-    console.log(`[BT-Worker] Download complete: ${torrent.name}. Destroying torrent to prevent seeding.`);
+    const mode = torrent.__mode || "download";
+    const keepAlive = mode === "seed";
+    console.log(
+      keepAlive
+        ? `[BT-Worker] Torrent complete: ${torrent.name}. Keeping alive for seeding.`
+        : `[BT-Worker] Download complete: ${torrent.name}. Destroying torrent to prevent seeding.`
+    );
     const infoHash = torrent.infoHash;
     // Send final status with all file info before destroying
     send({
@@ -229,13 +240,14 @@ async function handleStart(id, { magnetUri, announce }) {
           }))
         : [],
       magnetURI: torrent.magnetURI,
+      mode,
     });
     send({ type: "done", infoHash });
-    // Destroy immediately — keeps files on disk, stops all connections
-    // TODO: Skip destroy when in seed mode (future bt:// website hosting)
-    torrent.destroy({ destroyStore: false }, () => {
-      console.log(`[BT-Worker] Torrent destroyed (no seeding): ${infoHash}`);
-    });
+    if (!keepAlive) {
+      torrent.destroy({ destroyStore: false }, () => {
+        console.log(`[BT-Worker] Torrent destroyed (no seeding): ${infoHash}`);
+      });
+    }
   });
 
   torrent.on("error", (err) => {
@@ -272,6 +284,39 @@ async function handleStart(id, { magnetUri, announce }) {
     type: "started",
     infoHash: torrent.infoHash || hash || null,
     magnetURI: torrent.magnetURI,
+    mode: "download",
+  });
+}
+
+async function handleSeed(id, { inputPaths, announce, options }) {
+  if (!client) {
+    send({ id, error: "Client not initialized" });
+    return;
+  }
+
+  if (!Array.isArray(inputPaths) || inputPaths.length === 0) {
+    send({ id, error: "No input paths provided for seeding" });
+    return;
+  }
+
+  const existingPaths = inputPaths.filter((p) => typeof p === "string" && fs.existsSync(p));
+  if (existingPaths.length === 0) {
+    send({ id, error: "Seed paths do not exist" });
+    return;
+  }
+
+  console.log(`[BT-Worker] Seeding ${existingPaths.length} path(s)...`);
+  client.seed(existingPaths, { announce: announce || [], ...(options || {}) }, (torrent) => {
+    torrent.__mode = "seed";
+    console.log(`[BT-Worker] Seed ready: ${torrent.infoHash} (${torrent.name})`);
+    send({
+      id,
+      type: "started",
+      infoHash: torrent.infoHash,
+      magnetURI: torrent.magnetURI,
+      name: torrent.name,
+      mode: "seed",
+    });
   });
 }
 
