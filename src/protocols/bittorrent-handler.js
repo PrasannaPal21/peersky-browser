@@ -335,7 +335,7 @@ async function handleAPI(api, queryParams, infoHash, request) {
   }
 
   // Security: mutations require POST method
-  const mutationActions = ['start', 'pause', 'resume', 'remove'];
+  const mutationActions = ['start', 'seed', 'pause', 'resume', 'remove'];
   if (mutationActions.includes(api) && request.method !== 'POST') {
     return jsonResponse({ error: `${api} requires POST method` }, 405);
   }
@@ -344,6 +344,8 @@ async function handleAPI(api, queryParams, infoHash, request) {
     if (api === "start") {
       const magnetUri = queryParams.get("magnet");
       return await startTorrent(magnetUri);
+    } else if (api === "seed") {
+      return await seedTorrent(request, queryParams);
     } else if (api === "status") {
       // Serve from cache instantly — no IPC round-trip
       return getCachedStatus(hash);
@@ -406,6 +408,55 @@ async function startTorrent(magnetUri) {
     });
   } catch (err) {
     console.error("[BT] startTorrent error:", err);
+    return jsonResponse({ error: err.message }, 500);
+  }
+}
+
+async function seedTorrent(request, queryParams) {
+  try {
+    let inputPaths = [];
+
+    if (request.method === "POST") {
+      const contentType = (request.headers.get("content-type") || "").toLowerCase();
+      if (contentType.includes("application/json")) {
+        const body = await request.json();
+        if (Array.isArray(body?.paths)) {
+          inputPaths = body.paths;
+        }
+      }
+    }
+
+    if (inputPaths.length === 0) {
+      const rawPaths = queryParams.get("paths");
+      if (rawPaths) {
+        inputPaths = rawPaths
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean);
+      }
+    }
+
+    if (inputPaths.length === 0) {
+      return jsonResponse({ error: "No files or folders provided for seeding" }, 400);
+    }
+
+    const result = await sendCommand("seed", {
+      inputPaths,
+      announce: DEFAULT_TRACKERS,
+    });
+
+    if (result.error) {
+      return jsonResponse({ error: result.error }, 400);
+    }
+
+    return jsonResponse({
+      success: true,
+      infoHash: result.infoHash,
+      magnetURI: result.magnetURI,
+      mode: "seed",
+    });
+  } catch (err) {
+    console.error("[BT] seedTorrent error:", err);
     return jsonResponse({ error: err.message }, 500);
   }
 }
