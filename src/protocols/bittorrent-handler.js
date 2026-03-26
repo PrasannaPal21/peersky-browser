@@ -111,6 +111,7 @@ async function initializeWorker() {
 
     // Cache status updates from worker push
     if (msg.type === "status-update" && msg.infoHash) {
+      if (!msg.mode) msg.mode = "download";
       statusCache.set(msg.infoHash, msg);
       return;
     }
@@ -119,7 +120,11 @@ async function initializeWorker() {
     if (msg.type === "status-update-bulk" && msg.torrents) {
       msg.torrents.forEach(status => {
         if (status.infoHash) {
-          statusCache.set(status.infoHash, { ...status, type: "status-update" });
+          statusCache.set(status.infoHash, {
+            ...status,
+            mode: status.mode || "download",
+            type: "status-update",
+          });
         }
       });
       return;
@@ -129,6 +134,9 @@ async function initializeWorker() {
     if (msg.type === "done" && msg.infoHash) {
       const cached = statusCache.get(msg.infoHash);
       if (cached) {
+        if (cached.mode === "seed") {
+          return;
+        }
         cached.done = true;
         cached.downloadSpeed = 0;
         cached.uploadSpeed = 0;
