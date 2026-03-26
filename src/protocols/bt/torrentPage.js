@@ -159,6 +159,7 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
 
     <div class="button-group">
       <button id="startBtn" onclick="startTorrent()">Start Torrent</button>
+      <button id="seedBtn" class="secondary" onclick="seedTorrent()">Seed Files/Folder</button>
       <button id="pauseBtn" onclick="pauseTorrent()" disabled style="display:none;">Pause</button>
       <button id="resumeBtn" onclick="resumeTorrent()" disabled style="display:none;">Resume</button>
       <button class="secondary" onclick="copyMagnetLink()">Copy Magnet Link</button>
@@ -208,6 +209,7 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
     var statusInterval = null;
     var filesRendered = false;
     var torrentDownloadPath = '';
+    var currentMode = 'download';
 
     function showStatus(message, type) {
       document.getElementById('statusMessage').innerHTML = '<div class="status-message ' + type + '">' + message + '</div>';
@@ -215,6 +217,7 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
 
     function showProgressUI() {
       document.getElementById('startBtn').style.display = 'none';
+      document.getElementById('seedBtn').style.display = 'none';
       document.getElementById('progressContainer').style.display = 'block';
       document.getElementById('pauseBtn').style.display = 'inline-block';
       document.getElementById('pauseBtn').disabled = false;
@@ -247,10 +250,15 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
         var s = await apiCall('status', { hash: currentInfoHash || '' });
         if (s && !s.error && s.infoHash) {
           currentInfoHash = s.infoHash;
+          currentMode = s.mode || currentMode;
           showProgressUI();
           updateUIFromStatus(s);
           if (s.done) {
-            showStatus('Download complete! Files saved to Downloads/PeerskyTorrents.', 'success');
+            if (currentMode === 'seed') {
+              showStatus('Seeding is active.', 'success');
+            } else {
+              showStatus('Download complete! Files saved to Downloads/PeerskyTorrents.', 'success');
+            }
             document.getElementById('pauseBtn').style.display = 'none';
             document.getElementById('resumeBtn').style.display = 'none';
           } else if (s.paused) {
@@ -277,6 +285,7 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
         var data = await apiCall('start', { magnet: magnetUrl });
         if (data.success) {
           currentInfoHash = data.infoHash || currentInfoHash;
+          currentMode = data.mode || 'download';
           showStatus('Torrent started! Connecting to peers...', 'success');
           showProgressUI();
           statusInterval = setInterval(pollStatus, 2000);
@@ -292,10 +301,55 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
       }
     }
 
+    async function seedTorrent() {
+      if (!window.peersky || !window.peersky.pickBtSeedPaths) {
+        showStatus('Seed picker is not available in this context', 'error');
+        return;
+      }
+
+      var btn = document.getElementById('seedBtn');
+      btn.disabled = true;
+      btn.textContent = 'Selecting...';
+
+      try {
+        var selected = await window.peersky.pickBtSeedPaths();
+        if (!selected || selected.length === 0) {
+          btn.disabled = false;
+          btn.textContent = 'Seed Files/Folder';
+          return;
+        }
+
+        btn.textContent = 'Starting Seed...';
+        var resp = await fetch(apiBase + '?action=api&api=seed', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: selected })
+        });
+        var data = await resp.json();
+
+        if (data && data.success) {
+          currentInfoHash = data.infoHash || currentInfoHash;
+          currentMode = data.mode || 'seed';
+          showProgressUI();
+          showStatus('Seeding started. Waiting for peers...', 'success');
+          statusInterval = setInterval(pollStatus, 2000);
+        } else {
+          showStatus('Failed to start seeding: ' + (data && data.error ? data.error : 'Unknown error'), 'error');
+          btn.disabled = false;
+          btn.textContent = 'Seed Files/Folder';
+        }
+      } catch (err) {
+        showStatus('Error: ' + err.message, 'error');
+        btn.disabled = false;
+        btn.textContent = 'Seed Files/Folder';
+      }
+    }
+
     function updateUIFromStatus(s) {
       if (!s || s.error) return;
       if (s.infoHash) currentInfoHash = s.infoHash;
       if (s.downloadPath) torrentDownloadPath = s.downloadPath;
+      if (s.mode) currentMode = s.mode;
 
       var pct = Math.round((s.progress || 0) * 100);
       var fill = document.getElementById('progressFill');
@@ -330,9 +384,13 @@ export function generateTorrentUI(magnetUrl, torrentId, protocol, displayName, t
         if (s.done) {
           clearInterval(statusInterval);
           statusInterval = null;
-          showStatus('Download complete! Files saved to Downloads/PeerskyTorrents. Torrent stopped automatically (no seeding).', 'success');
-          document.getElementById('pauseBtn').style.display = 'none';
-          document.getElementById('resumeBtn').style.display = 'none';
+          if (currentMode === 'seed') {
+            showStatus('Seeding is active.', 'success');
+          } else {
+            showStatus('Download complete! Files saved to Downloads/PeerskyTorrents. Torrent stopped automatically (no seeding).', 'success');
+            document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('resumeBtn').style.display = 'none';
+          }
         }
       } catch (err) {
         console.error('[BT-UI] Poll error:', err);
