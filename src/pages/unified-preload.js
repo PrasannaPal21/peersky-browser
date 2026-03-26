@@ -41,7 +41,8 @@ const isBitTorrent =
 // Note: window.open() doesn't work for file:// URLs from custom protocols due to Electron security
 if (isBitTorrent) {
   contextBridge.exposeInMainWorld('peersky', {
-    openInTab: (fileUrl) => ipcRenderer.send('open-url-in-tab', fileUrl)
+    openInTab: (fileUrl) => ipcRenderer.send('open-url-in-tab', fileUrl),
+    pickBtSeedPaths: () => ipcRenderer.invoke('bt-select-seed-paths')
   });
 }
 

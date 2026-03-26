@@ -385,6 +385,27 @@ ipcMain.on('open-url-in-tab', (event, fileUrl) => {
   }
 });
 
+ipcMain.handle('bt-select-seed-paths', async (event) => {
+  try {
+    const parentWindow = BrowserWindow.fromWebContents(event.sender)
+      || BrowserWindow.getFocusedWindow()
+      || BrowserWindow.getAllWindows()[0];
+
+    const result = await dialog.showOpenDialog(parentWindow, {
+      properties: ['openFile', 'openDirectory', 'multiSelections'],
+    });
+
+    if (result.canceled || !Array.isArray(result.filePaths)) {
+      return [];
+    }
+
+    return result.filePaths;
+  } catch (error) {
+    console.error('[IPC] bt-select-seed-paths failed:', error);
+    return [];
+  }
+});
+
 ipcMain.on('new-window', (_event, options = {}) => {
   if (options.isolate) {
     windowManager.open({ ...options, restoreTabs: false }); // not restoring other tabs of isolated window
