@@ -67,6 +67,14 @@ function defaultWorkerReplies(proc) {
       proc.emit("message", { id, type: "removed", infoHash: msg.hash || HASH_HEX });
       return;
     }
+    if (action === "stop") {
+      proc.emit("message", { id, type: "stopped", infoHash: msg.hash || HASH_HEX });
+      return;
+    }
+    if (action === "unseed") {
+      proc.emit("message", { id, type: "unseeded", infoHash: msg.hash || HASH_HEX });
+      return;
+    }
     proc.emit("message", { id, error: `Unknown action: ${action}` });
   };
 }
@@ -208,6 +216,16 @@ describe("BitTorrent protocol handler", function () {
     expect(ipc.some((m) => m.action === "pause" && m.hash === HASH_HEX)).to.equal(true);
   });
 
+  it("accepts X-BT-Token header for mutations", async () => {
+    const { handler, child } = await loadHandler();
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+    const url = apiQuery({ api: "pause", hash: HASH_HEX });
+    const res = await handler(new Request(url, { method: "POST", headers: { "X-BT-Token": token } }));
+    expect(res.status).to.equal(200);
+    const ipc = child.send.getCalls().map((c) => c.args[0]);
+    expect(ipc.some((m) => m.action === "pause" && m.hash === HASH_HEX)).to.equal(true);
+  });
+
   it("status is 404 until worker pushes a status-update, then reads from cache", async () => {
     const { handler, child } = await loadHandler();
     const st = apiQuery({ api: "status", hash: HASH_HEX });
@@ -238,6 +256,34 @@ describe("BitTorrent protocol handler", function () {
     expect(data).to.not.have.property("type");
   });
 
+  it("list returns cached torrents sorted by name then infoHash", async () => {
+    const { handler, child } = await loadHandler();
+    child.emit("message", { type: "status-update", infoHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", name: "zeta", files: [] });
+    child.emit("message", { type: "status-update", infoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "alpha", files: [] });
+    child.emit("message", { type: "status-update", infoHash: "9999999999999999999999999999999999999999", name: "alpha", files: [] });
+
+    const res = await handler(new Request(apiQuery({ api: "list" })));
+    expect(res.status).to.equal(200);
+    const body = await jsonBody(res);
+    expect(body.torrents.map((t) => t.infoHash)).to.deep.equal([
+      "9999999999999999999999999999999999999999",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ]);
+  });
+
+  it("token endpoint mints a token usable for a mutation", async () => {
+    const { handler } = await loadHandler();
+    const tokenRes = await handler(new Request(apiQuery({ api: "token" })));
+    expect(tokenRes.status).to.equal(200);
+    const tokenBody = await jsonBody(tokenRes);
+    expect(tokenBody.token).to.be.a("string").with.lengthOf(48);
+
+    const start = apiQuery({ api: "start", magnet: encodeURIComponent(MAGNET), token: tokenBody.token });
+    const startRes = await handler(new Request(start, { method: "POST" }));
+    expect(startRes.status).to.equal(200);
+  });
+
   it("start merges custom tr= with defaults and returns success", async () => {
     const { handler, child } = await loadHandler();
     const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
@@ -263,6 +309,23 @@ describe("BitTorrent protocol handler", function () {
     expect((await jsonBody(res)).mode).to.equal("seed");
     const seed = child.send.getCalls().map((c) => c.args[0]).find((m) => m.action === "seed");
     expect(seed.magnetUri).to.include("urn:btih");
+  });
+
+  it("stop and unseed dispatch their worker actions", async () => {
+    const { handler, child } = await loadHandler();
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+
+    const stopRes = await handler(new Request(apiQuery({ api: "stop", hash: HASH_HEX, token }), { method: "POST" }));
+    expect(stopRes.status).to.equal(200);
+    expect((await jsonBody(stopRes)).stopped).to.equal(true);
+
+    const unseedRes = await handler(new Request(apiQuery({ api: "unseed", hash: HASH_HEX, token }), { method: "POST" }));
+    expect(unseedRes.status).to.equal(200);
+    expect((await jsonBody(unseedRes)).mode).to.equal("download");
+
+    const actions = child.send.getCalls().map((c) => c.args[0].action);
+    expect(actions).to.include("stop");
+    expect(actions).to.include("unseed");
   });
 
   it("bt://hash/path streams a file when cache lists it and bytes exist on disk", async () => {
@@ -423,6 +486,44 @@ describe("BitTorrent protocol handler", function () {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("resume from cache returns 409 when another torrent is actively seeding", async () => {
+    const { handler, child } = await loadHandler({
+      replyAs(proc) {
+        return (msg) => {
+          if (msg.id && msg.action === "resume") {
+            proc.emit("message", { id: msg.id, error: "Torrent not found" });
+            return;
+          }
+          defaultWorkerReplies(proc)(msg);
+        };
+      },
+    });
+
+    child.emit("message", {
+      type: "status-update",
+      infoHash: HASH_HEX,
+      mode: "download",
+      magnetURI: MAGNET,
+      paused: true,
+      files: [],
+    });
+    child.emit("message", {
+      type: "status-update",
+      infoHash: "1111111111111111111111111111111111111111",
+      mode: "seed",
+      isSeeding: true,
+      paused: false,
+      files: [],
+    });
+
+    const token = apiToken(await (await handler(new Request(`bt://${HASH_HEX}/`))).text());
+    const res = await handler(
+      new Request(apiQuery({ api: "resume", hash: HASH_HEX, token }), { method: "POST" }),
+    );
+    expect(res.status).to.equal(409);
+    expect((await jsonBody(res)).error).to.include("Cannot resume while another torrent is actively seeding");
   });
 
   it("base32 btih in hostname still renders a magnet link in the UI", async () => {
