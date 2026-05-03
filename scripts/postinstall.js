@@ -3,6 +3,30 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { get as httpsGet } from 'node:https';
+import { execSync } from 'node:child_process';
+
+// webtorrent → webrtc-polyfill ships its own node-datachannel; npm may skip the prebuild there.
+function syncNodeDatachannelPrebuilds(rootDir) {
+  const dirs = [
+    path.join(rootDir, 'node_modules', 'webrtc-polyfill', 'node_modules', 'node-datachannel'),
+    path.join(rootDir, 'node_modules', 'node-datachannel'),
+  ];
+  for (const modPath of dirs) {
+    if (!fsSync.existsSync(modPath)) continue;
+    const releaseDir = path.join(modPath, 'build', 'Release');
+    const hasBinary =
+      fsSync.existsSync(releaseDir) &&
+      fsSync.readdirSync(releaseDir).some((f) => f.endsWith('.node'));
+    if (hasBinary) continue;
+    const rel = path.relative(rootDir, modPath);
+    try {
+      console.log(`[postinstall] node-datachannel prebuild (${rel})`);
+      execSync('npx --yes prebuild-install -r napi', { cwd: modPath, stdio: 'inherit' });
+    } catch (err) {
+      console.warn(`[postinstall] prebuild-install failed in ${rel}:`, err?.message || err);
+    }
+  }
+}
 
 function downloadFile(url, destPath, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
@@ -44,6 +68,7 @@ function downloadFile(url, destPath, redirectsLeft = 5) {
 async function main() {
   try {
     const root = process.cwd();
+    syncNodeDatachannelPrebuilds(root);
     const preRoot = path.join(root, 'src', 'extensions', 'preinstalled-extensions');
     const preinstalledJsonPath = path.join(preRoot, 'preinstalled.json');
 

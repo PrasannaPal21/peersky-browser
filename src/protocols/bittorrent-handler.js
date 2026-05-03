@@ -284,21 +284,28 @@ async function initializeWorker() {
     loadTorrentStateCache();
   });
 
-  // Wait for worker to be ready (max 10s)
+  // Wait for worker to be ready (max 10s), or until the process exits (crash)
   await new Promise((resolve) => {
     const check = setInterval(() => {
-      if (workerReady) {
+      if (workerReady || !worker) {
         clearInterval(check);
+        clearTimeout(timeoutId);
         resolve();
       }
     }, 100);
-    setTimeout(() => {
+    const timeoutId = setTimeout(() => {
       clearInterval(check);
       resolve();
     }, 10000);
   });
 
-  log.info("[BT] Worker initialized. Download path:", downloadPath);
+  if (worker && workerReady) {
+    log.info("[BT] Worker initialized. Download path:", downloadPath);
+  } else {
+    log.error(
+      "[BT] Worker did not start (missing node-datachannel native build for WebTorrent). Re-run npm install, or: cd node_modules/webrtc-polyfill/node_modules/node-datachannel && npx prebuild-install -r napi"
+    );
+  }
 }
 
 function sendCommand(action, params = {}) {
